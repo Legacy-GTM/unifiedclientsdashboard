@@ -50,7 +50,7 @@ jobs:
                   r = json.loads(l); rows[r["date"]] = r
           open(p, "w").write("".join(json.dumps(r) + "\n" for _, r in sorted(rows.items())[-400:]))
           h = open(os.path.join(d, "dashboard.html")).read()
-          h = h.replace("<title>", '<meta http-equiv="refresh" content="300"><title>', 1)
+          h = h.replace("<title>", '<meta http-equiv="refresh" content="120"><title>', 1)
           open(os.path.join(d, "index.html"), "w").write(h)
           open(os.path.join(d, "robots.txt"), "w").write("User-agent: *\nDisallow: /\n")
           os.remove(os.path.join(d, "dashboard.html"))
