@@ -1,0 +1,65 @@
+name: refresh-dashboard
+on:
+  schedule:
+    - cron: "*/10 * * * *"      # GitHub minimum is 5 min; real start times drift by a few minutes
+  workflow_dispatch: {}
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+  actions: write                # lets the job re-enable its own schedule (GitHub pauses idle schedules after 60 days)
+concurrency:
+  group: dashboard
+  cancel-in-progress: false
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    env:
+      TZ: Africa/Lagos
+      DASH_DATA_DIR: ${{ github.workspace }}/site
+      INSTANTLY_API_KEY: ${{ secrets.INSTANTLY_API_KEY }}
+      SENDKIT_API_KEY: ${{ secrets.SENDKIT_API_KEY }}
+      CLOSE_API_KEY: ${{ secrets.CLOSE_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - uses: actions/configure-pages@v5
+      - name: Load previous data from the live site (keeps history + last-good fallback)
+        run: |
+          mkdir -p site && cp logo.webp site/
+          base="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}"
+          for f in last_good.json history.jsonl; do curl -fsS --max-time 30 "$base/$f" -o "site/$f" || rm -f "site/$f"; done
+          ls -la site
+      - name: Refresh (Instantly + Sendkit)
+        run: python3 refresh.py
+      - name: Build site
+        run: |
+          python3 - <<'PY'
+          import json, os
+          d = os.environ["DASH_DATA_DIR"]
+          # one history row per day (latest refresh wins), so the file does not grow every 10 min
+          p = os.path.join(d, "history.jsonl"); rows = {}
+          for l in open(p):
+              l = l.strip()
+              if l:
+                  r = json.loads(l); rows[r["date"]] = r
+          open(p, "w").write("".join(json.dumps(r) + "\n" for _, r in sorted(rows.items())[-400:]))
+          h = open(os.path.join(d, "dashboard.html")).read()
+          h = h.replace("<title>", '<meta http-equiv="refresh" content="300"><title>', 1)
+          open(os.path.join(d, "index.html"), "w").write(h)
+          open(os.path.join(d, "robots.txt"), "w").write("User-agent: *\nDisallow: /\n")
+          os.remove(os.path.join(d, "dashboard.html"))
+          PY
+          ls -la site
+      - uses: actions/upload-pages-artifact@v3
+        with: { path: site }
+      - id: deploy
+        uses: actions/deploy-pages@v4
+      - name: Keep the schedule alive
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: gh api -X PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/refresh.yml/enable" || true
