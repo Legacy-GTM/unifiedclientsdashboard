@@ -3,10 +3,13 @@ on:
   schedule:
     - cron: "*/10 * * * *"      # GitHub minimum is 5 min; real start times drift by a few minutes
   workflow_dispatch: {}
+# Publishing model: every run force-pushes ONE fresh orphan commit (new SHA each time) of the built site to the
+# `gh-pages` branch, and Pages is set to "Deploy from a branch: gh-pages /". This replaces actions/deploy-pages,
+# which keys each deployment on the triggering commit SHA (pages_build_version = GITHUB_SHA); repeated deploys of
+# the same main SHA were reported "success" but Pages kept serving the old artifact (actions/deploy-pages#383).
 permissions:
-  contents: read
-  pages: write
-  id-token: write
+  contents: write               # push the built site to gh-pages
+  pages: write                  # request a Pages build if the push alone did not start one
   actions: write                # lets the job re-enable its own schedule (GitHub pauses idle schedules after 60 days)
 concurrency:
   group: dashboard
@@ -15,9 +18,6 @@ jobs:
   refresh:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
     env:
       TZ: Africa/Lagos
       DASH_DATA_DIR: ${{ github.workspace }}/site
@@ -28,12 +28,16 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      - uses: actions/configure-pages@v5
-      - name: Load previous data from the live site (keeps history + last-good fallback)
+      - name: Load previous data (gh-pages branch, falling back to the live site)
         run: |
           mkdir -p site && cp logo.webp site/
+          if git fetch --depth=1 origin gh-pages 2>/dev/null; then
+            for f in last_good.json history.jsonl; do git show "FETCH_HEAD:$f" > "site/$f" 2>/dev/null || rm -f "site/$f"; done
+          fi
           base="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}"
-          for f in last_good.json history.jsonl; do curl -fsS --max-time 30 "$base/$f" -o "site/$f" || rm -f "site/$f"; done
+          for f in last_good.json history.jsonl; do
+            [ -s "site/$f" ] || curl -fsS --max-time 30 "$base/$f?x=$RANDOM" -o "site/$f" || rm -f "site/$f"
+          done
           ls -la site
       - name: Refresh (Instantly + Sendkit)
         run: python3 refresh.py
@@ -56,10 +60,34 @@ jobs:
           os.remove(os.path.join(d, "dashboard.html"))
           PY
           ls -la site
-      - uses: actions/upload-pages-artifact@v3
-        with: { path: site }
-      - id: deploy
-        uses: actions/deploy-pages@v4
+      - name: Publish to gh-pages (single orphan commit, new SHA every run)
+        run: |
+          set -euo pipefail
+          pub="$RUNNER_TEMP/pub"; rm -rf "$pub"; mkdir -p "$pub"
+          # allow-list only: nothing else from the workspace can be published
+          for f in index.html data.json last_good.json history.jsonl logo.webp robots.txt; do
+            [ -f "site/$f" ] && cp "site/$f" "$pub/"
+          done
+          touch "$pub/.nojekyll"
+          # refuse to publish if any secret value appears in the output
+          for s in "$INSTANTLY_API_KEY" "$SENDKIT_API_KEY" "$CLOSE_API_KEY"; do
+            if [ -n "$s" ] && grep -rqF -- "$s" "$pub"; then echo "secret found in site output; aborting"; exit 1; fi
+          done
+          cd "$pub"
+          git init -q -b gh-pages
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Dashboard refresh $(date '+%d %b %Y %H:%M:%S %Z') (run ${GITHUB_RUN_ID})"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push -q -f origin gh-pages
+          echo "published $(git rev-parse --short HEAD)"
+        env: { GH_TOKEN: "${{ github.token }}" }
+      - name: Make sure Pages builds this commit
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          sleep 5
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/pages/builds" --jq .status || echo "pages build request failed (push should still trigger a build)"
       - name: Keep the schedule alive
         env: { GH_TOKEN: "${{ github.token }}" }
         run: gh api -X PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/refresh.yml/enable" || true
