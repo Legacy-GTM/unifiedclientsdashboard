@@ -7,9 +7,9 @@ on:
 # `gh-pages` branch, and Pages is set to "Deploy from a branch: gh-pages /". This replaces actions/deploy-pages,
 # which keys each deployment on the triggering commit SHA (pages_build_version = GITHUB_SHA); repeated deploys of
 # the same main SHA were reported "success" but Pages kept serving the old artifact (actions/deploy-pages#383).
+# The push itself triggers GitHub's pages-build-deployment run (no extra API call: a second build request cancels the first).
 permissions:
   contents: write               # push the built site to gh-pages
-  pages: write                  # request a Pages build if the push alone did not start one
   actions: write                # lets the job re-enable its own schedule (GitHub pauses idle schedules after 60 days)
 concurrency:
   group: dashboard
@@ -83,11 +83,6 @@ jobs:
           git push -q -f origin gh-pages
           echo "published $(git rev-parse --short HEAD)"
         env: { GH_TOKEN: "${{ github.token }}" }
-      - name: Make sure Pages builds this commit
-        env: { GH_TOKEN: "${{ github.token }}" }
-        run: |
-          sleep 5
-          gh api -X POST "repos/${GITHUB_REPOSITORY}/pages/builds" --jq .status || echo "pages build request failed (push should still trigger a build)"
       - name: Keep the schedule alive
         env: { GH_TOKEN: "${{ github.token }}" }
         run: gh api -X PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/refresh.yml/enable" || true
